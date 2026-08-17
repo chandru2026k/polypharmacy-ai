@@ -2,14 +2,6 @@
 main.py
 
 FastAPI entrypoint for the polypharmacy interaction checker.
-
-Step 3 of the build: manual input -> interaction check.
-Accepts a list of drug names (as typed by the user, brand or generic,
-any casing/artifacts) and returns all pairwise interaction results using
-interactions.py, which itself uses normalizer.py under the hood.
-
-Run locally with:
-    uvicorn main:app --reload
 """
 
 import os
@@ -24,6 +16,7 @@ from interactions import check_medication_list, get_db
 from explainer import explain_interaction
 from extractor import extract_and_normalize, extract_drug_mentions
 from ocr_processor import extract_text_from_image
+from severity_scorer import compute_severity
 
 app = FastAPI(
     title="Polypharmacy Interaction Checker API",
@@ -31,8 +24,6 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Allow the (currently unbuilt) frontend to hit this from localhost during
-# dev. Tighten this once the frontend has a real deployed origin.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,9 +32,6 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# Request / response schemas
-# ---------------------------------------------------------------------------
 class MedicationCheckRequest(BaseModel):
     drugs: List[str] = Field(
         ..., min_length=2,
@@ -81,6 +69,9 @@ class InteractionOut(BaseModel):
     note: Optional[str] = None
     doctor_explanation: Optional[str] = None
     patient_explanation: Optional[str] = None
+    computed_severity: Optional[str] = None
+    severity_score: Optional[int] = None
+    score_breakdown: Optional[dict] = None
 
 
 class MedicationCheckResponse(BaseModel):
@@ -101,6 +92,7 @@ def _to_normalized_out(nd) -> NormalizedDrugOut:
 
 def _to_interaction_out(result) -> InteractionOut:
     explanation = explain_interaction(result) if result.found else {}
+    scored = compute_severity(result) if result.found else None
     return InteractionOut(
         drug_1=result.drug_1_input,
         drug_2=result.drug_2_input,
@@ -115,20 +107,17 @@ def _to_interaction_out(result) -> InteractionOut:
         note=result.note,
         doctor_explanation=explanation.get("doctor_explanation"),
         patient_explanation=explanation.get("patient_explanation"),
+        computed_severity=scored["computed_severity"] if scored else None,
+        severity_score=scored["severity_score"] if scored else None,
+        score_breakdown=scored["score_breakdown"] if scored else None,
     )
 
 
-# ---------------------------------------------------------------------------
-# Startup: load the interaction DB once so the first request isn't slow.
-# ---------------------------------------------------------------------------
 @app.on_event("startup")
 def _preload_db():
     get_db()
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -157,9 +146,6 @@ def check_interactions(payload: MedicationCheckRequest):
 
 @app.post("/extract-and-check", response_model=MedicationCheckResponse)
 def extract_and_check(payload: NoteExtractRequest):
-    """Takes free text (e.g. a pasted clinical note), extracts drug
-    mentions via extractor.py's vocabulary matcher, then runs the same
-    interaction check as /check-interactions."""
     raw_mentions = extract_drug_mentions(payload.text)
 
     if len(raw_mentions) < 2:
@@ -186,10 +172,6 @@ def extract_and_check(payload: NoteExtractRequest):
 
 @app.post("/ocr-and-check", response_model=MedicationCheckResponse)
 async def ocr_and_check(file: UploadFile = File(...)):
-    """Step 7 endpoint: accepts an uploaded image (photo/scan of a
-    prescription or medication list), runs OCR via ocr_processor.py,
-    extracts drug mentions, then runs the same interaction check as
-    /check-interactions."""
     allowed_types = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
     if file.content_type not in allowed_types:
         raise HTTPException(

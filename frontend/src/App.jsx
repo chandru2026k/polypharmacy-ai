@@ -1,45 +1,26 @@
 import { useState } from "react";
 import axios from "axios";
 import "./App.css";
+import InteractionGraph from "./InteractionGraph";
 
 const API_URL_MANUAL = "http://127.0.0.1:8000/check-interactions";
 const API_URL_EXTRACT = "http://127.0.0.1:8000/extract-and-check";
 const API_URL_OCR = "http://127.0.0.1:8000/ocr-and-check";
-
-const SEVERITY_STYLES = {
-  High: { bg: "#fde2e2", border: "#e05252", text: "#8a1f1f" },
-  Moderate: { bg: "#fff3d6", border: "#e0a852", text: "#8a5a1f" },
-  Low: { bg: "#e6f4ea", border: "#4caf6e", text: "#1f6b34" },
-};
-
-function severityStyle(severity) {
-  return SEVERITY_STYLES[severity] || { bg: "#eee", border: "#999", text: "#333" };
-}
 
 function ConfidenceBadge({ confidence }) {
   const label =
     confidence === "exact"
       ? "Direct match"
       : confidence === "class_fallback"
-      ? "Class-level match (lower confidence)"
+      ? "Class-level"
       : "No match";
-  const color =
-    confidence === "exact" ? "#2f6f4f" : confidence === "class_fallback" ? "#8a6a1f" : "#888";
-  return (
-    <span
-      style={{
-        fontSize: "0.75rem",
-        color,
-        border: `1px solid ${color}`,
-        borderRadius: "999px",
-        padding: "2px 8px",
-        marginLeft: "8px",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {label}
-    </span>
-  );
+  const cls =
+    confidence === "exact"
+      ? "confidence-badge confidence-badge--exact"
+      : confidence === "class_fallback"
+      ? "confidence-badge confidence-badge--class"
+      : "confidence-badge confidence-badge--none";
+  return <span className={cls}>{label}</span>;
 }
 
 function ExplanationToggle({ result }) {
@@ -72,14 +53,49 @@ function ExplanationToggle({ result }) {
   );
 }
 
-function ResultCard({ result }) {
-  const style = result.found ? severityStyle(result.severity) : null;
+function ScoreBreakdown({ breakdown }) {
+  const [open, setOpen] = useState(false);
+  if (!breakdown) return null;
 
+  const rows = Object.entries(breakdown).map(([key, detail]) => {
+    const label = key.replace(/_/g, " ");
+    const pts = detail.points;
+    return { key, label, pts, detail };
+  });
+
+  return (
+    <div className="score-breakdown">
+      <button
+        type="button"
+        className="score-toggle"
+        onClick={() => setOpen((o) => !o)}
+      >
+        {open ? "Hide" : "Show"} score breakdown
+      </button>
+      {open && (
+        <table className="score-table">
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td className="score-table__label">{row.label}</td>
+                <td className={`score-table__points ${row.pts < 0 ? "score-table__points--neg" : ""}`}>
+                  {row.pts > 0 ? "+" : ""}{row.pts}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function ResultCard({ result }) {
   if (!result.found) {
     return (
       <div className="result-card result-card--empty">
         <div className="result-card__header">
-          <strong>{result.drug_1}</strong> + <strong>{result.drug_2}</strong>
+          {result.drug_1} + {result.drug_2}
           <ConfidenceBadge confidence={result.confidence} />
         </div>
         <p className="result-card__note">
@@ -91,32 +107,29 @@ function ResultCard({ result }) {
   }
 
   return (
-    <div
-      className="result-card"
-      style={{ backgroundColor: style.bg, borderColor: style.border }}
-    >
+    <div className="result-card" data-severity={result.severity}>
       <div className="result-card__header">
-        <strong>{result.drug_1}</strong> + <strong>{result.drug_2}</strong>
+        {result.drug_1} + {result.drug_2}
         <ConfidenceBadge confidence={result.confidence} />
       </div>
 
       <div className="result-card__meta">
-        <span
-          className="severity-pill"
-          style={{ backgroundColor: style.border, color: "white" }}
-        >
-          {result.severity} severity
-        </span>
+        <span className="severity-pill">{result.severity} severity</span>
+        {result.computed_severity && (
+          <span className="score-pill">
+            score {result.severity_score}/100 → {result.computed_severity}
+          </span>
+        )}
         <span className="relation-type">{result.relation_type}</span>
         <span className="mention-count">
           seen {result.mention_count} time{result.mention_count === 1 ? "" : "s"} in source data
         </span>
       </div>
 
+      <ScoreBreakdown breakdown={result.score_breakdown} />
+
       {result.evidence_sentence && (
-        <p className="evidence" style={{ color: style.text }}>
-          “{result.evidence_sentence}”
-        </p>
+        <p className="evidence">“{result.evidence_sentence}”</p>
       )}
 
       <ExplanationToggle result={result} />
@@ -282,6 +295,9 @@ export default function App() {
             medications — <strong>{response.interactions_found}</strong> interaction
             {response.interactions_found === 1 ? "" : "s"} found.
           </div>
+
+          <InteractionGraph results={response.results} />
+
           {response.results.map((result, idx) => (
             <ResultCard key={idx} result={result} />
           ))}
